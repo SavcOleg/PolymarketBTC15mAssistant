@@ -87,20 +87,62 @@ function safeTimeMs(x) {
   return Number.isFinite(t) ? t : null;
 }
 
+/**
+ * Polymarket crypto up/down intraday markets encode window start in the slug:
+ * {asset}-updown-{5|15}m-{unixSecStart}
+ * e.g. btc-updown-15m-1775637000, eth-updown-5m-1766161800
+ */
+export function parseBtcUpDownSlug(slug) {
+  const m = String(slug || "").match(/(\w+)-updown-(5|15)m-(\d+)/i);
+  if (!m) return null;
+  const durationMin = m[2] === "5" ? 5 : 15;
+  const startMs = Number(m[3]) * 1000;
+  if (!Number.isFinite(startMs)) return null;
+  return {
+    asset: m[1].toUpperCase(),
+    durationMin,
+    startMs,
+    endMs: startMs + durationMin * 60_000,
+  };
+}
+
+/**
+ * Align strategy candle window with the active Polymarket market when possible,
+ * else fall back to UTC epoch-aligned buckets (same boundaries when markets match slug).
+ */
+export function resolveLiveWindowBounds(nowMs, windowMinutes, pm = {}) {
+  const winMs = windowMinutes * 60_000;
+  const expectedDur = windowMinutes <= 5 ? 5 : 15;
+  const parsed = parseBtcUpDownSlug(pm.slug);
+  if (parsed && parsed.durationMin === expectedDur) {
+    if (nowMs >= parsed.startMs && nowMs < parsed.endMs) {
+      return { windowStart: parsed.startMs, windowEnd: parsed.endMs };
+    }
+  }
+  const endMs = pm.endMs != null && Number.isFinite(pm.endMs) ? pm.endMs : null;
+  if (endMs != null && nowMs >= endMs - winMs && nowMs < endMs) {
+    return { windowStart: endMs - winMs, windowEnd: endMs };
+  }
+  const windowStart = Math.floor(nowMs / winMs) * winMs;
+  return { windowStart, windowEnd: windowStart + winMs };
+}
+
 export function pickLatestLiveMarket(markets, nowMs = Date.now()) {
   if (!Array.isArray(markets) || markets.length === 0) return null;
 
   const enriched = markets
     .map((m) => {
       const endMs = safeTimeMs(m.endDate);
-      const startMs = safeTimeMs(m.eventStartTime ?? m.startTime ?? m.startDate);
-      return { m, endMs, startMs };
+      const slugInfo = parseBtcUpDownSlug(m.slug);
+      const metaStartMs = safeTimeMs(m.eventStartTime ?? m.startTime ?? m.startDate);
+      const effectiveStartMs = slugInfo?.startMs ?? metaStartMs;
+      return { m, endMs, effectiveStartMs };
     })
     .filter((x) => x.endMs !== null);
 
   const live = enriched
     .filter((x) => {
-      const started = x.startMs === null ? true : x.startMs <= nowMs;
+      const started = x.effectiveStartMs === null ? true : x.effectiveStartMs <= nowMs;
       return started && nowMs < x.endMs;
     })
     .sort((a, b) => a.endMs - b.endMs);
@@ -110,6 +152,27 @@ export function pickLatestLiveMarket(markets, nowMs = Date.now()) {
   const upcoming = enriched
     .filter((x) => nowMs < x.endMs)
     .sort((a, b) => a.endMs - b.endMs);
+
+  return upcoming.length ? upcoming[0].m : null;
+}
+
+/**
+ * Find the next market that hasn't started yet (for pre-ordering).
+ * Returns the soonest market whose start time is still in the future.
+ */
+export function pickNextUpcomingMarket(markets, nowMs = Date.now()) {
+  if (!Array.isArray(markets) || markets.length === 0) return null;
+
+  const upcoming = markets
+    .map((m) => {
+      const endMs = safeTimeMs(m.endDate);
+      const slugInfo = parseBtcUpDownSlug(m.slug);
+      const metaStartMs = safeTimeMs(m.eventStartTime ?? m.startTime ?? m.startDate);
+      const effectiveStartMs = slugInfo?.startMs ?? metaStartMs;
+      return { m, endMs, effectiveStartMs };
+    })
+    .filter((x) => x.endMs !== null && x.effectiveStartMs !== null && x.effectiveStartMs > nowMs)
+    .sort((a, b) => a.effectiveStartMs - b.effectiveStartMs);
 
   return upcoming.length ? upcoming[0].m : null;
 }

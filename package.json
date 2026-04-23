@@ -4,11 +4,23 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "live": "node src/indexLive.js",
+    "backtest": "node backtest/server.js",
+    "backtest:dual": "node backtest/testDualPosition.js",
+    "simulate:dual": "node backtest/simulateDualPosition.js",
+    "paper:dual": "node backtest/paperTradeTest.js",
+    "optimize-cli": "node backtest/cli-optimize.mjs",
+    "arena:report": "node backtest/arena-report.mjs"
   },
   "dependencies": {
+    "@ethersproject/wallet": "^5.8.0",
+    "@polymarket/clob-client": "^5.8.1",
+    "@supabase/supabase-js": "^2.101.1",
+    "dotenv": "^17.4.0",
     "ethers": "^6.11.1",
     "https-proxy-agent": "^7.0.6",
+    "pmxtjs": "^2.22.2",
     "socks-proxy-agent": "^8.0.5",
     "undici": "^6.21.3",
     "ws": "^8.18.0"

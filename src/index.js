@@ -19,6 +19,7 @@ import { computeHeikenAshi, countConsecutive } from "./indicators/heikenAshi.js"
 import { detectRegime } from "./engines/regime.js";
 import { scoreDirection, applyTimeAwareness } from "./engines/probability.js";
 import { computeEdge, decide } from "./engines/edge.js";
+import { SignalBuffer } from "./engines/signalBuffer.js";
 import { appendCsvRow, formatNumber, formatPct, getCandleWindowTiming, sleep } from "./utils.js";
 import { startBinanceTradeStream } from "./data/binanceWs.js";
 import fs from "node:fs";
@@ -404,6 +405,10 @@ async function main() {
   let prevCurrentPrice = null;
   let priceToBeatState = { slug: null, value: null, setAtMs: null };
 
+  // Signal consensus buffer — 60-second rolling window, requires 70% agreement
+  const signalBuf = new SignalBuffer({ windowSecs: 60, minRatio: 0.70, minCount: 10 });
+  let lastWindowSlug = null;
+
   const header = [
     "timestamp",
     "entry_minute",
@@ -512,7 +517,31 @@ async function main() {
       const marketDown = poly.ok ? poly.prices.down : null;
       const edge = computeEdge({ modelUp: timeAware.adjustedUp, modelDown: timeAware.adjustedDown, marketYes: marketUp, marketNo: marketDown });
 
-      const rec = decide({ remainingMinutes: timeLeftMin, edgeUp: edge.edgeUp, edgeDown: edge.edgeDown, modelUp: timeAware.adjustedUp, modelDown: timeAware.adjustedDown });
+      // Reset the consensus buffer when a new Polymarket window opens
+      const currentWindowSlug = poly.ok ? String(poly.market?.slug ?? "") : null;
+      if (currentWindowSlug && currentWindowSlug !== lastWindowSlug) {
+        signalBuf.reset();
+        lastWindowSlug = currentWindowSlug;
+      }
+
+      const rec = decide({
+        remainingMinutes: timeLeftMin,
+        edgeUp: edge.edgeUp,
+        edgeDown: edge.edgeDown,
+        modelUp: timeAware.adjustedUp,
+        modelDown: timeAware.adjustedDown,
+        entryMinute: timing.elapsedMinutes,
+        regime: regimeInfo.regime,
+      });
+
+      // Push raw signal (before consensus gate) to buffer for tracking
+      signalBuf.push({ action: rec.action, side: rec.side });
+
+      // Apply consensus gate: only confirm ENTER when the buffer agrees
+      const bufState = signalBuf.consensus();
+      const confirmedRec = rec.action === "ENTER" && !bufState.agree
+        ? { ...rec, action: "NO_TRADE", reason: "awaiting_consensus", strength: null }
+        : rec;
 
       const vwapSlopeLabel = vwapSlope === null ? "-" : vwapSlope > 0 ? "UP" : vwapSlope < 0 ? "DOWN" : "FLAT";
 
@@ -542,6 +571,18 @@ async function main() {
       const predictValue = `${ANSI.green}LONG${ANSI.reset} ${ANSI.green}${formatProbPct(pLong, 0)}${ANSI.reset} / ${ANSI.red}SHORT${ANSI.reset} ${ANSI.red}${formatProbPct(pShort, 0)}${ANSI.reset}`;
       const predictLine = `Predict: ${predictValue}`;
 
+      // Consensus display: show agreement ratio and buffer status
+      const consensusRatioStr = bufState.ready
+        ? `${(bufState.ratio * 100).toFixed(0)}% ${bufState.side ?? "-"} (${bufState.count} samples)`
+        : `warming up (${bufState.count}/${signalBuf.minCount})`;
+      const consensusColor = bufState.agree ? ANSI.green : ANSI.yellow;
+      const consensusLine = `${consensusColor}${consensusRatioStr}${ANSI.reset}`;
+
+      // Raw signal (before consensus gate) for diagnostic display
+      const rawSignalLabel = rec.action === "ENTER"
+        ? `${rec.side} ${rec.strength ?? ""} (raw)`
+        : `NO TRADE (${rec.reason ?? "-"})`;
+
       const marketUpStr = `${marketUp ?? "-"}${marketUp === null || marketUp === undefined ? "" : "¢"}`;
       const marketDownStr = `${marketDown ?? "-"}${marketDown === null || marketDown === undefined ? "" : "¢"}`;
       const polyHeaderValue = `${ANSI.green}↑ UP${ANSI.reset} ${marketUpStr}  |  ${ANSI.red}↓ DOWN${ANSI.reset} ${marketDownStr}`;
@@ -563,11 +604,11 @@ async function main() {
       const vwapValue = `${formatNumber(vwapNow, 0)} (${formatPct(vwapDist, 2)}) | slope: ${vwapSlopeLabel}`;
       const vwapLine = formatNarrativeValue("VWAP", vwapValue, vwapNarrative);
 
-      const signal = rec.action === "ENTER" ? (rec.side === "UP" ? "BUY UP" : "BUY DOWN") : "NO TRADE";
+      const signal = confirmedRec.action === "ENTER" ? (confirmedRec.side === "UP" ? "BUY UP" : "BUY DOWN") : "NO TRADE";
 
-      const actionLine = rec.action === "ENTER"
-        ? `${rec.action} NOW (${rec.phase} ENTRY)`
-        : `NO TRADE (${rec.phase})`;
+      const actionLine = confirmedRec.action === "ENTER"
+        ? `${confirmedRec.action} NOW (${confirmedRec.phase} ENTRY)`
+        : `NO TRADE (${confirmedRec.phase ?? rec.phase})`;
 
       const spreadUp = poly.ok ? poly.orderbook.up.spread : null;
       const spreadDown = poly.ok ? poly.orderbook.down.spread : null;
@@ -680,6 +721,9 @@ async function main() {
         kv("MACD:", macdLine.split(": ")[1] ?? macdLine),
         kv("Delta 1/3:", deltaLine.split(": ")[1] ?? deltaLine),
         kv("VWAP:", vwapLine.split(": ")[1] ?? vwapLine),
+        kv("Regime:", `${ANSI.white}${regimeInfo.regime}${ANSI.reset} (${regimeInfo.reason})`),
+        kv("Raw signal:", rawSignalLabel),
+        kv("Consensus:", consensusLine),
         "",
         sepLine(),
         "",
@@ -718,7 +762,11 @@ async function main() {
         marketDown,
         edge.edgeUp,
         edge.edgeDown,
-        rec.action === "ENTER" ? `${rec.side}:${rec.phase}:${rec.strength}` : "NO_TRADE"
+        confirmedRec.action === "ENTER"
+          ? `${confirmedRec.side}:${confirmedRec.phase}:${confirmedRec.strength}`
+          : rec.action === "ENTER"
+            ? `PENDING:${rec.side}:${rec.strength ?? ""}(${rec.reason ?? "awaiting_consensus"})`
+            : "NO_TRADE"
       ]);
     } catch (err) {
       console.log("────────────────────────────");
