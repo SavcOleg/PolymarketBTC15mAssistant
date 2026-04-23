@@ -1,5 +1,6 @@
 import { initClobClient, placeBuyOrder, placeSellOrder, cancelOrder, getBalances, fetchPolymarketAccountSnapshot } from "../../backtest/clobTrader.js";
 import { insertTrade, updateTrade, insertSession, updateSession } from "../db/supabase.js";
+import telegramNotifier from "../notifications/telegram.js";
 
 /**
  * Live Trading Engine
@@ -171,15 +172,29 @@ class LiveTrader {
           position.tradeId = trade.id;
           this.sessionStats.tradesOpened++;
           
-          // Update session stats
-          await this.updateSessionStats();
+// Update session stats
+        await this.updateSessionStats();
+
+        // Send Telegram notification
+        try {
+          await telegramNotifier.sendTradeSignal({
+            market: market?.slug || 'Unknown',
+            side,
+            price,
+            confidence: 0.7, // placeholder - could be calculated from edge score
+            indicators: {},
+            timestamp: new Date(),
+            strategy: 'LiveTrading',
+          });
+        } catch (err) {
+          console.warn('[LiveTrader] Failed to send Telegram notification:', err.message);
+        }
         }
       } catch (err) {
         console.warn("[LiveTrader] Failed to save trade to database:", err.message);
       }
 
-      // Calculate and log take-profit target
-      const takeProfitPrice = price * (1 + TAKE_PROFIT_PERCENT);
+      // Log take-profit target
       console.log(`[LiveTrader] Position opened. Take-profit target: ${(takeProfitPrice * 100).toFixed(2)}¢`);
     }
 
@@ -256,6 +271,22 @@ class LiveTrader {
             const pnl = (orderInfo.price / 100 * pos.size) - pos.costUsd;
             
             console.log(`[LiveTrader] Position closed with profit: ${profit.toFixed(2)}% ($${pnl.toFixed(2)})`);
+
+            // Send Telegram notification
+            try {
+              await telegramNotifier.sendTradeFill({
+                market: pos.marketSlug || 'Unknown',
+                side: pos.side,
+                filledPrice: orderInfo.price,
+                size: pos.size,
+                pnl,
+                pnlPercent: profit,
+                timestamp: new Date(),
+                orderId,
+              });
+            } catch (err) {
+              console.warn('[LiveTrader] Failed to send Telegram notification:', err.message);
+            }
             
             // Update trade in database
             if (pos.tradeId) {

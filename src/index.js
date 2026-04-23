@@ -26,6 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { applyGlobalProxyFromEnv } from "./net/proxy.js";
+import { exportPrediction } from "./export/predictions.js";
 
 function countVwapCrosses(closes, vwapSeries, lookback) {
   if (closes.length < lookback || vwapSeries.length < lookback) return null;
@@ -542,6 +543,25 @@ async function main() {
       const confirmedRec = rec.action === "ENTER" && !bufState.agree
         ? { ...rec, action: "NO_TRADE", reason: "awaiting_consensus", strength: null }
         : rec;
+
+      // Export prediction for external consumption (e.g., arbitrage bot)
+      exportPrediction({
+        timestamp: Date.now(),
+        marketSlug: poly.ok ? poly.market?.slug : null,
+        modelUp: timeAware.adjustedUp,
+        modelDown: timeAware.adjustedDown,
+        marketYes: marketUp,
+        marketNo: marketDown,
+        edge,
+        decision: confirmedRec,
+        indicators: {
+          rsi: rsiNow,
+          macd,
+          vwap: vwapNow,
+          vwapSlope,
+          heikenAshi: consec,
+        },
+      });
 
       const vwapSlopeLabel = vwapSlope === null ? "-" : vwapSlope > 0 ? "UP" : vwapSlope < 0 ? "DOWN" : "FLAT";
 
